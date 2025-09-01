@@ -34,10 +34,14 @@ if df.empty:
 px = df["price"]
 ret = px.pct_change()
 
-# -------- Signal & positions (same logic as your Colab cell) --------
-signal = px.pct_change(lookback) - px.pct_change(skip_recent)
-pos = np.where(signal > 0, 1, (-1 if allow_short else 0))
-pos = pd.Series(pos, index=px.index).shift(1).fillna(0)
+# Signal (ensure plain 1-D numpy array)
+signal = (px.pct_change(lookback) - px.pct_change(skip_recent)).reindex(px.index)
+sig_np = signal.to_numpy()  # 1-D array
+
+# Positions (force 1-D)
+pos_np = np.where(sig_np > 0, 1, (-1 if allow_short else 0)).astype(float)
+pos = pd.Series(pos_np, index=px.index, name="pos").shift(1).fillna(0)
+
 
 turnover = pos.diff().abs().fillna(0)
 tc = (tc_bps / 10000.0) * turnover   # simple cost per position change
