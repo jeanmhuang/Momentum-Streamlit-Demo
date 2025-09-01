@@ -34,13 +34,36 @@ if df.empty:
 px = df["price"]
 ret = px.pct_change()
 
-# Signal (ensure plain 1-D numpy array)
-signal = (px.pct_change(lookback) - px.pct_change(skip_recent)).reindex(px.index)
-sig_np = signal.to_numpy()  # 1-D array
+# --- Ensure px is a 1-D Series named 'price' ---
+if isinstance(df, pd.DataFrame) and "price" in df.columns:
+    px = df["price"]
+elif isinstance(df, pd.Series):
+    px = df.rename("price")
+else:
+    # last resort: squeeze a single-column frame
+    px = pd.Series(df.squeeze(), index=df.index, name="price")
 
-# Positions (force 1-D)
-pos_np = np.where(sig_np > 0, 1, (-1 if allow_short else 0)).astype(float)
-pos = pd.Series(pos_np, index=px.index, name="pos").shift(1).fillna(0)
+ret = px.pct_change()
+
+# --- Momentum signal (force 1-D) ---
+signal = (px.pct_change(lookback) - px.pct_change(skip_recent))
+signal = signal.astype(float)                         # ensure numeric
+signal = signal.reindex(px.index)                    # align to price index
+
+# --- Positions (force 1-D NumPy -> 1-D Series) ---
+sig_vals = signal.values.ravel()                     # <-- guarantees 1-D
+pos_vals = np.where(sig_vals > 0, 1.0, (-1.0 if allow_short else 0.0))
+pos = pd.Series(pos_vals, index=signal.index, name="pos")
+
+# align to px index, then lag to avoid look-ahead
+pos = pos.reindex(px.index, fill_value=0.0).shift(1).fillna(0.0)
+
+# --- Turnover & simple transaction costs ---
+turnover = pos.diff().abs().fillna(0.0)
+tc = (tc_bps / 10000.0) * turnover
+
+# --- Strategy returns (net of simple costs) ---
+strat = pos * ret - tc
 
 
 turnover = pos.diff().abs().fillna(0)
