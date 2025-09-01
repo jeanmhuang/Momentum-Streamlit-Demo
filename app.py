@@ -72,19 +72,32 @@ strat = pos * ret - tc
 
 # -------- Helper: perf stats --------
 def perf_stats(returns, freq=252):
-    r = returns.dropna()
-    if r.empty: 
-        return {"CAGR": np.nan, "Vol": np.nan, "Sharpe": np.nan, "MaxDD": np.nan, "Hit": np.nan}
-    cagr = (1 + r).prod() ** (freq / len(r)) - 1
-    vol = r.std() * np.sqrt(freq)
-    sharpe = cagr / vol if vol else np.nan
+    # Coerce to a 1-D Series
+    if isinstance(returns, pd.DataFrame):
+        if returns.shape[1] == 1:
+            r = returns.iloc[:, 0].dropna()
+        else:
+            # If a DataFrame slipped in, take equal-weighted mean across cols
+            r = returns.mean(axis=1).dropna()
+    elif isinstance(returns, pd.Series):
+        r = returns.dropna()
+    else:
+        r = pd.Series(returns).dropna()
+
+    n = len(r)
+    if n < 2:
+        return {"CAGR": np.nan, "Vol": np.nan, "Sharpe": np.nan, "Max Drawdown": np.nan, "Hit Rate": np.nan}
+
+    cagr = (1 + r).prod() ** (freq / n) - 1
+    vol = float(r.std() * np.sqrt(freq))  # ensure scalar float
+    sharpe = (cagr / vol) if (np.isfinite(vol) and vol > 0) else np.nan
+
     cum = (1 + r).cumprod()
     maxdd = (cum / cum.cummax() - 1).min()
     hit = (r > 0).mean()
-    return {"CAGR": cagr, "Vol": vol, "Sharpe": sharpe, "MaxDD": maxdd, "Hit": hit}
 
-bh_stats = perf_stats(ret)
-st_stats = perf_stats(strat)
+    return {"CAGR": cagr, "Vol": vol, "Sharpe": sharpe, "Max Drawdown": maxdd, "Hit Rate": hit}
+
 
 # -------- Layout --------
 left, right = st.columns([3, 2])
