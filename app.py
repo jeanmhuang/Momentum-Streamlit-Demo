@@ -9,32 +9,59 @@ st.set_page_config(page_title="Momentum Backtest (Demo)", layout="wide")
 
 # ---------------- Sidebar controls ----------------
 st.sidebar.title("Momentum Backtest")
-ticker = st.sidebar.text_input("Ticker", "SPY").upper()
+# enforce single ticker just in case user pastes "SPY, AAPL"
+ticker = st.sidebar.text_input("Ticker", "SPY").split(",")[0].strip().upper()
 start = st.sidebar.date_input("Start date", dt.date(2015, 1, 1))
 lookback = st.sidebar.slider("Lookback (trading days ~12m=252)", 60, 504, 252, step=21)
 skip_recent = st.sidebar.slider("Exclude recent (days ~1m=21)", 0, 60, 21, step=7)
 allow_short = st.sidebar.checkbox("Allow short when signal ≤ 0", True)
 tc_bps = st.sidebar.number_input("Transaction cost (bps per side)", 0.0, 100.0, 10.0, step=1.0)
 
-# ---------------- Data loader ----------------
+# ---------------- Data loader (always returns 1-D Series) ----------------
 @st.cache_data(show_spinner=False)
-def load_prices(ticker: str, start_date: dt.date) -> pd.Series:
-    """Return 1-D price series (float) indexed by date."""
-    df = yf.download(ticker, start=start_date, auto_adjust=True, progress=False)
+def load_price_series(t: str, start_date: dt.date) -> pd.Series:
+    """
+    Download daily prices and return a 1-D float Series named 'price', robust to MultiIndex columns.
+    """
+    df = yf.download(t, start=start_date, auto_adjust=True, progress=False)
     if df.empty:
         return pd.Series(dtype=float)
-    px = df.get("Close", pd.Series(dtype=float)).astype(float)
-    px.name = "price"
-    return px.dropna()
 
-# ---------------- Perf stats ----------------
-def perf_stats(returns: pd.Series, freq: int = 252) -> dict:
-    """Robust stats on a 1-D return series."""
-    if isinstance(returns, pd.DataFrame):
-        r = returns.mean(axis=1).astype(float).dropna()
+    # If yfinance returns MultiIndex columns (e.g., ('Close','SPY'))
+    if isinstance(df.columns, pd.MultiIndex):
+        if ("Close", t) in df.columns:
+            px = df[("Close", t)]
+        elif ("Adj Close", t) in df.columns:
+            px = df[("Adj Close", t)]
+        else:
+            # fallback: first column with top level Close / Adj Close
+            px = None
+            for col in df.columns:
+                top = col[0] if isinstance(col, tuple) else col
+                if top in ("Close", "Adj Close"):
+                    px = df[col]
+                    break
+            if px is None:
+                return pd.Series(dtype=float)
     else:
-        r = pd.Series(returns).astype(float).dropna()
+        # Single-index columns
+        if "Close" in df.columns:
+            px = df["Close"]
+        elif "Adj Close" in df.columns:
+            px = df["Adj Close"]
+        else:
+            return pd.Series(dtype=float)
 
+    # Ensure 1-D Series with float dtype and clean name
+    px = pd.Series(px, index=df.index, name="price").astype(float).dropna()
+    return px
+
+# ---------------- Perf stats (robust) ----------------
+def perf_stats(returns: pd.Series, freq: int = 252) -> dict:
+    """
+    Compute basic performance stats on a 1-D return series.
+    """
+    r = pd.Series(returns).astype(float).dropna()
     n = len(r)
     if n < 2:
         nan = np.nan
@@ -48,16 +75,13 @@ def perf_stats(returns: pd.Series, freq: int = 252) -> dict:
     hit = (r > 0).mean()
     return {"CAGR": cagr, "Vol": vol, "Sharpe": sharpe, "Max Drawdown": maxdd, "Hit Rate": hit}
 
-# ---------------- Download data ----------------
+# ---------------- Download & basic guards ----------------
 with st.spinner("Downloading prices…"):
-    px = load_prices(ticker, start)
+    px = load_price_series(ticker, start)
 
 if px.empty:
     st.error("No data returned. Try another ticker or an earlier start date.")
     st.stop()
-
-# force 1-D series (paranoia)
-px = pd.Series(px.values, index=px.index, name="price").astype(float)
 
 # Guard: enough history for selected windows
 min_len = max(lookback, skip_recent) + 5
@@ -65,24 +89,26 @@ if len(px) < min_len:
     st.error("Not enough price history for selected parameters. Choose an earlier start date or smaller lookback.")
     st.stop()
 
-# ---------------- Signal / positions / returns ----------------
+# ---------------- Signal / positions / returns (all forced to 1-D Series) ----------------
 # Returns
-ret = pd.Series(px.pct_change().values, index=px.index, name="ret").astype(float)
+ret = px.pct_change().astype(float)
+ret.name = "ret"
 
 # Momentum signal: past lookback minus recent window (12–1 proxy)
-sig_raw = (px.pct_change(lookback) - px.pct_change(skip_recent))
-signal = pd.Series(sig_raw.values, index=px.index, name="signal").astype(float)
+signal = (px.pct_change(lookback) - px.pct_change(skip_recent)).astype(float)
+signal.name = "signal"
 
-# Positions from signal (1 for long, -1 or 0 otherwise), lag 1 day to avoid look-ahead
-pos_vals = np.where(signal.values > 0.0, 1.0, (-1.0 if allow_short else 0.0))
-pos = pd.Series(pos_vals, index=px.index, name="pos").shift(1).fillna(0.0)
+# Positions from signal (1 for long, -1 or 0 otherwise), then lag 1 day to avoid look-ahead
+pos = pd.Series(np.where(signal.values > 0.0, 1.0, (-1.0 if allow_short else 0.0)),
+                index=px.index, name="pos").shift(1).fillna(0.0)
 
 # Turnover & simple transaction costs (cost applied when position changes)
-turnover = pd.Series(pos.diff().abs().fillna(0.0).values, index=px.index, name="turnover")
-tc = pd.Series((tc_bps / 10000.0) * turnover.values, index=px.index, name="tc")
+turnover = pos.diff().abs().fillna(0.0)
+tc = (tc_bps / 10000.0) * turnover
 
 # Strategy net returns
-strat = pd.Series((pos * ret - tc).values, index=px.index, name="strat").astype(float)
+strat = (pos * ret - tc).astype(float)
+strat.name = "strat"
 
 # ---------------- Stats ----------------
 bh_stats = perf_stats(ret)
@@ -93,14 +119,14 @@ left, right = st.columns([3, 2])
 
 with left:
     st.title("Momentum Strategy vs Buy & Hold")
-    st.caption("Signal = past lookback return minus recent return (12–1 proxy). Positions are lagged by 1 day. Simple turnover-based costs.")
+    st.caption("Signal = past lookback return minus recent return (12–1 proxy). Positions lagged by 1 day. Simple turnover-based costs.")
 
-    # Align & build equity curves safely
+    # Align both series and build equity curves
     idx = ret.index.intersection(strat.index)
     ret_series = ret.loc[idx].dropna()
     strat_series = strat.loc[idx].dropna()
 
-    if ret_series.empty or strat_series.empty or len(idx) == 0:
+    if ret_series.empty or strat_series.empty:
         st.error("No overlapping data after alignment. Adjust parameters.")
         st.stop()
 
@@ -143,3 +169,4 @@ with right:
 
 st.divider()
 st.caption("Educational demo only; simplified assumptions; not investment advice.")
+
